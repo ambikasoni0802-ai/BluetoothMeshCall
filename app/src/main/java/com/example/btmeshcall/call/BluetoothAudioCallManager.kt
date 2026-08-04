@@ -40,34 +40,68 @@ class BluetoothAudioCallManager(private val adapter: BluetoothAdapter) {
     private var playbackThread: Thread? = null
     private var acceptThread: Thread? = null
 
+    private var fallbackServerSocket: BluetoothServerSocket? = null
+    private val alreadyConnected = AtomicBoolean(false)
+
     fun listenForIncomingCall(listener: Listener) {
+        alreadyConnected.set(false)
+
         acceptThread = Thread {
             try {
                 serverSocket = adapter.listenUsingRfcommWithServiceRecord("BtMeshCall", CALL_UUID)
                 val socket = serverSocket?.accept()
-                serverSocket?.close()
-                if (socket != null) {
+                if (socket != null && alreadyConnected.compareAndSet(false, true)) {
+                    fallbackServerSocket?.close()
                     activeSocket = socket
                     beginStreaming(socket, listener)
+                } else {
+                    socket?.close()
                 }
             } catch (e: IOException) {
-                Log.e(TAG, "listen failed", e)
-                listener.onCallEnded("Listen failed: ${e.message}")
+                Log.e(TAG, "standard listen ended: ${e.message}")
             }
         }
         acceptThread?.start()
+
+        Thread {
+            try {
+                val method = adapter.javaClass.getMethod("listenUsingRfcommOn", Int::class.javaPrimitiveType)
+                fallbackServerSocket = method.invoke(adapter, 1) as BluetoothServerSocket
+                val socket = fallbackServerSocket?.accept()
+                if (socket != null && alreadyConnected.compareAndSet(false, true)) {
+                    serverSocket?.close()
+                    activeSocket = socket
+                    beginStreaming(socket, listener)
+                } else {
+                    socket?.close()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "fallback listen ended: ${e.message}")
+            }
+        }.start()
     }
 
     fun callDevice(device: BluetoothDevice, listener: Listener) {
         Thread {
+            adapter.cancelDiscovery()
             try {
                 val socket = device.createRfcommSocketToServiceRecord(CALL_UUID)
-                adapter.cancelDiscovery()
                 socket.connect()
                 activeSocket = socket
                 beginStreaming(socket, listener)
+                return@Thread
             } catch (e: IOException) {
-                Log.e(TAG, "connect failed", e)
+                Log.e(TAG, "standard connect failed, trying fallback", e)
+            }
+
+            try {
+                val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                val fallbackSocket = method.invoke(device, 1) as BluetoothSocket
+                fallbackSocket.connect()
+                activeSocket = fallbackSocket
+                beginStreaming(fallbackSocket, listener)
+            } catch (e: Exception) {
+                Log.e(TAG, "fallback connect also failed", e)
                 listener.onCallEnded("Connect failed: ${e.message}")
             }
         }.start()
@@ -77,6 +111,7 @@ class BluetoothAudioCallManager(private val adapter: BluetoothAdapter) {
         running.set(false)
         try { activeSocket?.close() } catch (_: IOException) {}
         try { serverSocket?.close() } catch (_: IOException) {}
+        try { fallbackServerSocket?.close() } catch (_: IOException) {}
         recordThread?.interrupt()
         playbackThread?.interrupt()
     }
