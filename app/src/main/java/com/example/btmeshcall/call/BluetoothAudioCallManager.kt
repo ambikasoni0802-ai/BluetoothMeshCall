@@ -7,7 +7,6 @@ import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -40,68 +39,38 @@ class BluetoothAudioCallManager(private val adapter: BluetoothAdapter) {
     private var playbackThread: Thread? = null
     private var acceptThread: Thread? = null
 
-    private var fallbackServerSocket: BluetoothServerSocket? = null
-    private val alreadyConnected = AtomicBoolean(false)
-
+    // Receiver waale phone par ye call karo — caller ke call karne se PEHLE
     fun listenForIncomingCall(listener: Listener) {
-        alreadyConnected.set(false)
-
         acceptThread = Thread {
             try {
                 serverSocket = adapter.listenUsingRfcommWithServiceRecord("BtMeshCall", CALL_UUID)
-                val socket = serverSocket?.accept()
-                if (socket != null && alreadyConnected.compareAndSet(false, true)) {
-                    fallbackServerSocket?.close()
+                Log.d(TAG, "Waiting for incoming call...")
+                val socket = serverSocket?.accept() // yahan block karega jab tak caller connect na kare
+                serverSocket?.close() // socket mil jaane ke baad hi close karo
+                if (socket != null) {
                     activeSocket = socket
                     beginStreaming(socket, listener)
-                } else {
-                    socket?.close()
                 }
             } catch (e: IOException) {
-                Log.e(TAG, "standard listen ended: ${e.message}")
+                Log.e(TAG, "listen ended: ${e.message}")
+                listener.onCallEnded("Listen failed: ${e.message}")
             }
         }
         acceptThread?.start()
-
-        Thread {
-            try {
-                val method = adapter.javaClass.getMethod("listenUsingRfcommOn", Int::class.javaPrimitiveType)
-                fallbackServerSocket = method.invoke(adapter, 1) as BluetoothServerSocket
-                val socket = fallbackServerSocket?.accept()
-                if (socket != null && alreadyConnected.compareAndSet(false, true)) {
-                    serverSocket?.close()
-                    activeSocket = socket
-                    beginStreaming(socket, listener)
-                } else {
-                    socket?.close()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "fallback listen ended: ${e.message}")
-            }
-        }.start()
     }
 
+    // Caller waale phone par ye call karo
     fun callDevice(device: BluetoothDevice, listener: Listener) {
         Thread {
-            adapter.cancelDiscovery()
+            adapter.cancelDiscovery() // connect se pehle discovery zaroor band karo
             try {
                 val socket = device.createRfcommSocketToServiceRecord(CALL_UUID)
                 socket.connect()
                 activeSocket = socket
                 beginStreaming(socket, listener)
-                return@Thread
             } catch (e: IOException) {
-                Log.e(TAG, "standard connect failed, trying fallback", e)
-            }
-
-            try {
-                val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-                val fallbackSocket = method.invoke(device, 1) as BluetoothSocket
-                fallbackSocket.connect()
-                activeSocket = fallbackSocket
-                beginStreaming(fallbackSocket, listener)
-            } catch (e: Exception) {
-                Log.e(TAG, "fallback connect also failed", e)
+                Log.e(TAG, "connect failed", e)
+                try { } catch (_: IOException) {}
                 listener.onCallEnded("Connect failed: ${e.message}")
             }
         }.start()
@@ -111,7 +80,6 @@ class BluetoothAudioCallManager(private val adapter: BluetoothAdapter) {
         running.set(false)
         try { activeSocket?.close() } catch (_: IOException) {}
         try { serverSocket?.close() } catch (_: IOException) {}
-        try { fallbackServerSocket?.close() } catch (_: IOException) {}
         recordThread?.interrupt()
         playbackThread?.interrupt()
     }
