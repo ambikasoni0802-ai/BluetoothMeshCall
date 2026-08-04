@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
         MeshHolder.mesh?.start()
+                com.example.btmeshcall.call.CallListenerHolder.start(adapter, applicationContext)
     }
 
     override fun onDestroy() {
